@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lab 2FA · Login</title>
+<style>
+  :root { --bg:#0f172a; --card:#1e293b; --text:#e2e8f0; --muted:#94a3b8; --accent:#38bdf8; --ok:#22c55e; --err:#ef4444; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--text); display:flex; justify-content:center; padding:32px 16px; }
+  main { width:100%; max-width:440px; }
+  h1 { font-size:1.4rem; margin:0 0 4px; }
+  p.sub { color:var(--muted); margin:0 0 24px; font-size:.9rem; }
+  section { background:var(--card); border-radius:12px; padding:20px; margin-bottom:16px; }
+  section[hidden] { display:none; }
+  h2 { font-size:1rem; margin:0 0 12px; }
+  label { display:block; font-size:.8rem; color:var(--muted); margin:10px 0 4px; }
+  input, select { width:100%; padding:10px; border-radius:8px; border:1px solid #334155; background:#0f172a; color:var(--text); font-size:1rem; }
+  input.code { font-size:1.6rem; letter-spacing:.4em; text-align:center; font-family: ui-monospace, monospace; }
+  .row { display:flex; gap:8px; margin-top:14px; }
+  button { flex:1; padding:10px; border:0; border-radius:8px; background:var(--accent); color:#0f172a; font-weight:600; cursor:pointer; }
+  button.secondary { background:#334155; color:var(--text); }
+  img.qr { display:block; margin:8px auto; background:#fff; padding:8px; border-radius:8px; width:200px; }
+  code.secret { display:block; word-break:break-all; background:#0f172a; padding:8px; border-radius:6px; font-size:.85rem; }
+  ul.backup { columns:2; font-family: ui-monospace, monospace; padding-left:18px; }
+  #status { padding:10px 12px; border-radius:8px; font-size:.85rem; white-space:pre-wrap; word-break:break-word; }
+  #status.ok { background:rgba(34,197,94,.15); color:var(--ok); }
+  #status.err { background:rgba(239,68,68,.15); color:var(--err); }
+  .badge { display:inline-block; padding:2px 8px; border-radius:999px; background:#334155; font-size:.75rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Lab 2FA · Step-Up Auth</h1>
+  <p class="sub">Login con usuario y contraseña → segundo factor TOTP → bóveda protegida.</p>
+
+  <section id="step-login">
+    <h2>1. Usuario y contraseña</h2>
+    <label for="username">Usuario</label>
+    <input id="username" autocomplete="username">
+    <label for="password">Contraseña</label>
+    <input id="password" type="password" autocomplete="current-password">
+    <div class="row">
+      <button id="btn-login">Iniciar sesión</button>
+      <button id="btn-register" class="secondary">Registrarme</button>
+    </div>
+  </section>
+
+  <section id="step-setup" hidden>
+    <h2>2. Activar 2FA <span class="badge" id="mfa-status"></span></h2>
+    <p class="sub">Escanea el QR con tu app (o pega el secreto) e ingresa el primer código para pasar a ACTIVE.</p>
+    <img class="qr" id="qr" alt="Código QR otpauth">
+    <label>Secreto Base32</label>
+    <code class="secret" id="secret"></code>
+    <label>Códigos de respaldo (guárdalos, se muestran una sola vez)</label>
+    <ul class="backup" id="backup-codes"></ul>
+    <label for="activate-code">Código de 6 dígitos</label>
+    <input id="activate-code" class="code" inputmode="numeric" maxlength="6">
+    <div class="row"><button id="btn-activate">Activar 2FA</button></div>
+  </section>
+
+  <section id="step-verify" hidden>
+    <h2>2. Segundo factor</h2>
+    <label for="method">Método</label>
+    <select id="method">
+      <option value="totp">Código TOTP (app)</option>
+      <option value="backup">Código de respaldo</option>
+    </select>
+    <label for="verify-code">Código</label>
+    <input id="verify-code" class="code" maxlength="8">
+    <div class="row"><button id="btn-verify">Verificar</button></div>
+  </section>
+
+  <section id="step-vault" hidden>
+    <h2>3. Bóveda secreta</h2>
+    <div class="row">
+      <button id="btn-vault">GET /api/boveda-secreta</button>
+      <button id="btn-logout" class="secondary">Salir</button>
+    </div>
+  </section>
+
+  <div id="status" hidden></div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const state = { setupToken: null, preAuthToken: null, accessToken: null };
+
+function show(step) {
+  for (const id of ["step-login", "step-setup", "step-verify", "step-vault"]) $(id).hidden = id !== step;
+}
+
+function status(msg, ok) {
+  const el = $("status");
+  el.hidden = false;
+  el.className = ok ? "ok" : "err";
+  el.textContent = typeof msg === "string" ? msg : JSON.stringify(msg, null, 2);
+}
+
+async function api(path, { body, token, method = "POST" } = {}) {
+  const headers = { "Content-Type": "application/json" };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const res = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`${res.status} · ${data.error || ""} ${data.detail ? JSON.stringify(data.detail) : ""}`);
+  return data;
+}
+
+const creds = () => ({ username: $("username").value.trim(), password: $("password").value });
+
+$("btn-register").onclick = async () => {
+  try { const u = await api("/auth/register", { body: creds() }); status(`Usuario '${u.username}' creado. Ahora inicia sesión.`, true); }
+  catch (e) { status(e.message, false); }
+};
+
+$("btn-login").onclick = async () => {
+  try {
+    const r = await api("/auth/login", { body: creds() });
+    if (r.status === "MFA_REQUIRED") {
+      state.preAuthToken = r.pre_auth_token;
+      status("Contraseña correcta. Se emitió un pre_auth_token (no sirve para la bóveda).", true);
+      show("step-verify");
+    } else {
+      state.setupToken = r.setup_token;
+      await startSetup();
+    }
+  } catch (e) { status(e.message, false); }
+};
+
+async function startSetup() {
+  const s = await api("/2fa/setup", { token: state.setupToken });
+  $("mfa-status").textContent = s.mfa_status;
+  $("qr").src = `data:image/png;base64,${s.qr_png_base64}`;
+  $("secret").textContent = s.secret;
+  $("backup-codes").innerHTML = s.backup_codes.map((c) => `<li>${c}</li>`).join("");
+  status(`Configuración creada en estado ${s.mfa_status}.`, true);
+  show("step-setup");
+}
+
+$("btn-activate").onclick = async () => {
+  try {
+    const r = await api("/2fa/activate", { token: state.setupToken, body: { code: $("activate-code").value.trim() } });
+    status(`${r.detail}. Vuelve a iniciar sesión para usar el segundo factor.`, true);
+    show("step-login");
+  } catch (e) { status(e.message, false); }
+};
+
+$("btn-verify").onclick = async () => {
+  try {
+    const r = await api("/auth/verify-2fa", {
+      body: { pre_auth_token: state.preAuthToken, code: $("verify-code").value.trim(), method: $("method").value },
+    });
+    state.accessToken = r.access_token;
+    status("2FA correcto: access_token con mfa_verified=true.", true);
+    show("step-vault");
+  } catch (e) { status(e.message, false); }
+};
+
+$("btn-vault").onclick = async () => {
+  try { status(await api("/api/boveda-secreta", { method: "GET", token: state.accessToken }), true); }
+  catch (e) { status(e.message, false); }
+};
+
+$("btn-logout").onclick = () => {
+  Object.keys(state).forEach((k) => (state[k] = null));
+  $("verify-code").value = ""; $("activate-code").value = "";
+  status("Sesión cerrada.", true);
+  show("step-login");
+};
+</script>
+</body>
+</html>

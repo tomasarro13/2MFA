@@ -1,0 +1,7 @@
+.DS_Store
+# Backend
+backend-prefect/.venv/
+backend-prefect/.env
+backend-prefect/*.db
+__pycache__/
+.pytest_cache/

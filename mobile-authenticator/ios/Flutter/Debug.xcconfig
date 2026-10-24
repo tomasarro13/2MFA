@@ -1,0 +1,6 @@
+#include "Generated.xcconfig"
+
+// Xcode 27: `lipo -verify_arch` ya no acepta varias arquitecturas a la vez (Flutter 3.44 le pasa
+// "arm64 x86_64"). En Mac Apple Silicon el simulador solo necesita arm64.
+ARCHS[sdk=iphonesimulator*] = arm64
+EXCLUDED_ARCHS[sdk=iphonesimulator*] = x86_64
